@@ -2,6 +2,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <wait.h>
 #define MAX_CMD_ARG 10
 
 const char *prompt = "myshell> ";
@@ -35,11 +37,28 @@ int makelist(char *s, const char *delimiters, char** list, int MAX_LIST){
   return numtokens;
 }
 
+int child_flag;
+static void handler(int signo) {
+	if(child_flag == 1) {
+		signal(signo, SIG_DFL);
+	}
+	else if(child_flag == 0) {
+		switch(signo) {
+			case SIGINT:
+			case SIGQUIT:
+				printf("\n");
+				break;
+		}
+	}
+}
+
 int main(int argc, char**argv){
   int i=0;
   pid_t pid;
+  signal(SIGINT, handler);
+  signal(SIGQUIT, handler);
+  
   while (1) {
-      
   	fputs(prompt, stdout);
 	fgets(cmdline, BUFSIZ, stdin);
 	cmdline[ strlen(cmdline) - 1] = '\0';
@@ -66,8 +85,10 @@ int main(int argc, char**argv){
 	}
 	else {
 		switch(pid=fork()){
-		case 0: 
+		case 0:
+			child_flag = 1;
 			if(backflag == 1) {
+				child_flag = 0;
 				pid_t tmp_pid;
 				tmp_pid = fork();
 				if(tmp_pid == 0) {
