@@ -1,0 +1,299 @@
+#include <string.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <wait.h>
+#include <fcntl.h>
+#define MAX_CMD_ARG 20
+#define MAX_PIPE_ARG 5
+
+const char *prompt = "myshell> ";
+char* cmdvector[MAX_CMD_ARG];
+char  cmdline[BUFSIZ];
+char* pipevector[MAX_PIPE_ARG];
+
+void fatal(char *str){
+	perror(str);
+	exit(1);
+}
+
+int makelist(char *s, const char *delimiters, char** list, int MAX_LIST){	
+  int i = 0;
+  int numtokens = 0;
+  char *snew = NULL;
+
+  if( (s==NULL) || (delimiters==NULL) ) return -1;
+
+  snew = s + strspn(s, delimiters);	/* delimiters¸¦ skip */
+  if( (list[numtokens]=strtok(snew, delimiters)) == NULL )
+    return numtokens;
+	
+  numtokens = 1;
+  
+  while(1){
+     if( (list[numtokens]=strtok(NULL, delimiters)) == NULL)
+	break;
+     if(numtokens == (MAX_LIST-1)) return -1;
+     numtokens++;
+  }
+  return numtokens;
+}
+
+int child_exist = 0;
+static void sh_int(int signo) {
+	printf("\n");
+	if(child_exist == 0)
+	        write(fileno(stdin), prompt, strlen(prompt));
+}
+
+static void sh_chld(int signo) {
+	wait(NULL);
+}
+
+int is_redirection(char **cmd) {
+	for(int i = 0; cmd[i] != NULL; i++) {
+		char *tmp;
+		if((tmp = strchr(cmd[i], '<')) || (tmp = strchr(cmd[i], '>')))
+			return 1;
+		else continue;
+	}
+	return 0;
+}
+
+int redirect_in_fd[3] = {STDIN_FILENO, 0, 0};
+int redirect_out_fd[3] = {STDOUT_FILENO, 0, 0};
+int redirection(char **cmd) {
+	int i;
+	int type;
+	for(int j = 0; cmd[j] != NULL; j++) {
+		char *tmp;
+		if((tmp = strchr(cmd[j], '<'))) {
+			i = j;
+			type = 0;
+		}
+		else if((tmp = strchr(cmd[j], '>'))) {
+			i = j;
+			type = 1;
+		}
+	}
+
+	if(type == 0) {
+		redirect_in_fd[1] = dup(redirect_in_fd[0]);
+		if((redirect_in_fd[2] = open(cmd[i+1], O_RDONLY, 0644)) == -1) {
+                        fprintf(stderr, "file open error\n");
+                        return -1;
+                }
+                dup2(redirect_in_fd[2], STDIN_FILENO);
+		close(redirect_in_fd[2]);
+	}
+	else if(type == 1) {
+		redirect_out_fd[1] = dup(redirect_out_fd[0]);
+		if((redirect_out_fd[2] = open(cmd[i+1], O_WRONLY|O_CREAT, 0644)) == -1) {
+			fprintf(stderr, "file open error\n");
+			return -2;
+		}
+		dup2(redirect_out_fd[2], STDOUT_FILENO);
+		close(redirect_out_fd[2]);
+	}
+
+	cmd[i] = NULL;
+        cmd[i+1] = NULL;
+        for(; cmd[i + 2] != NULL; i++)
+                cmd[i] = cmd[i+2];
+        cmd[i] = NULL;
+
+	return 0;
+}
+
+int join() {
+	int p[2], status;
+
+	switch(fork()) {
+                case -1: fprintf(stderr, "1st fork call in join\n");
+                         return -1;
+                case 0: 
+			 break;
+                default: wait(&status);
+                         return status;
+        }
+
+	int i;
+	for(i = 0; pipevector[i+1] != NULL; i++) {
+		if(pipe(p) == -1) {
+	                fprintf(stderr, "pipe call in join\n");
+                	return -2;
+	        }
+        	switch(fork()) {
+			case -1: fprintf(stderr, "2nd fork call in join\n");
+                        	 return -3;
+                	case 0:{
+				dup2(p[1], STDOUT_FILENO);
+				char* child_com[MAX_CMD_ARG] = {NULL, };
+				makelist(pipevector[i], " \t", child_com, MAX_CMD_ARG);
+				close(p[0]);
+        	                close(p[1]);
+				while(is_redirection(child_com) != 0) {
+					redirection(child_com);
+				}
+	                        execvp(child_com[0], child_com);
+                        	fprintf(stderr, "1st execvp call in join\n");
+                	        return -4;
+        	                }
+	                default: {
+				 wait(NULL);
+				 dup2(p[0], STDIN_FILENO);
+				 close(p[0]);
+				 close(p[1]);
+				 }
+	       	}
+	}
+	char *parent_com[MAX_CMD_ARG];
+        makelist(pipevector[i], " \t", parent_com, MAX_CMD_ARG);
+	while(is_redirection(parent_com) != 0) {
+		redirection(parent_com);
+	}
+        execvp(parent_com[0], parent_com);
+        fprintf(stderr, "2nd execvp call in join\n");
+        return -5;
+}
+
+int main(int argc, char**argv){
+  int i=0;
+  pid_t pid;
+
+  static struct sigaction sig_int;
+  sig_int.sa_handler = sh_int;
+  sig_int.sa_flags = SA_RESTART;
+  sigemptyset(&sig_int.sa_mask);
+
+  sigaction(SIGINT, &sig_int, NULL);
+  sigaction(SIGQUIT, &sig_int, NULL);
+
+  static struct sigaction sig_chld;
+  sig_chld.sa_handler = sh_chld;
+  sig_chld.sa_flags = SA_RESTART;
+  sigemptyset(&sig_chld.sa_mask);
+
+  sigaction(SIGCHLD, &sig_chld, NULL);
+
+  while (1) {
+	for(i = 0; pipevector[i] != NULL; i++)
+		pipevector[i] = NULL;
+	child_exist = 0;
+  	fputs(prompt, stdout);
+	fgets(cmdline, BUFSIZ, stdin);
+	cmdline[ strlen(cmdline) - 1] = '\0';
+	
+	if(cmdline[0] == '\0')
+		continue;
+
+	int redirection_flag = 0;
+	int pipe_flag = 0;
+	i = 0;
+	while(cmdline[i] != '\0') {
+		if(cmdline[i] == '<' || cmdline[i] == '>')
+			redirection_flag++;
+		else if(cmdline[i] == '|')
+			pipe_flag++;
+		i++;
+	}
+
+	int argnum = makelist(cmdline, " \t", cmdvector, MAX_CMD_ARG);
+
+	int backflag = 0;
+	if(!strcmp(cmdvector[argnum - 1], "&")) {
+		cmdvector[argnum - 1] = NULL;
+		backflag = 1;
+	}
+
+	if(!strcmp(cmdvector[0], "exit"))
+		break;
+	else if(!strcmp(cmdvector[0], "cd")) {
+		if(argnum != 2) {
+			fprintf(stderr, "Usage : cd directory_name\n");
+			continue;
+		}
+		
+		if(chdir(cmdvector[1]) == -1) {
+			fprintf(stderr, "working directory change error\n");
+		}
+	}
+	else if(pipe_flag != 0) {
+		char pipe_tmp[100];
+		int pipevector_i = 0;
+		int pipe_tmp_i = 0;
+		for(i = 0; cmdvector[i] != NULL; i++) {
+			char *tmp;
+			if((tmp = strchr(cmdvector[i], '|'))) {
+				pipevector[pipevector_i] = malloc(sizeof(char) * 100);
+				strcpy(pipevector[pipevector_i++], pipe_tmp);
+				pipe_tmp[0] = '\0';
+			}
+			else {
+				strcat(pipe_tmp, cmdvector[i]);
+				strcat(pipe_tmp, " ");
+			}
+		}
+		pipevector[pipevector_i] = malloc(sizeof(char) * 100);
+                strcpy(pipevector[pipevector_i], pipe_tmp);
+		pipe_tmp[0] = '\0';
+
+		if(backflag == 1) {
+			pid_t pid = fork();
+			if(pid == 0) {
+				join();
+				return 0;
+			}
+		}
+		else
+			join();
+	}
+	else {
+		if(redirection != 0) {
+			while(is_redirection(cmdvector) != 0) 
+				redirection(cmdvector);
+        	}
+
+		switch(pid=fork()){
+		case 0:
+			signal(SIGINT, SIG_DFL);
+			signal(SIGQUIT, SIG_DFL);
+
+			if(backflag == 1) {
+				pid_t tmp_pid;
+				tmp_pid = fork();
+				if(tmp_pid == 0) {
+					execvp(cmdvector[0], cmdvector);
+				}
+				else if(tmp_pid == -1)
+					fatal("background");
+			}
+			else {
+				execvp(cmdvector[0], cmdvector);
+			}
+			fatal("main()");
+		case -1:
+  			fatal("main()");
+		default:
+			child_exist = 1;
+			wait(NULL);
+		}
+	}
+	fflush(NULL);
+	if(redirection_flag != 0) {
+		if(redirect_in_fd[1] != 0) {
+			dup2(redirect_in_fd[1], STDIN_FILENO);
+			close(redirect_in_fd[1]);
+			redirect_in_fd[1] = 0;
+		}
+		if(redirect_out_fd[1] != 0) {
+			dup2(redirect_out_fd[1], STDOUT_FILENO);
+			close(redirect_out_fd[1]);
+			redirect_out_fd[1] = 0;
+		}
+	}
+  }
+
+  return 0;
+}
